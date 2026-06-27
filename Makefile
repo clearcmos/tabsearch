@@ -38,8 +38,13 @@ install-cli: cli
 install-app: bundle
 	cp -R $(APP_BUNDLE) /Applications/
 
+# One-shot for a fresh machine: build, install to /Applications, and launch the app so it
+# fires the Accessibility/Automation prompts. Then enable "Launch at Login" from its menu.
+setup: install-app
+	open /Applications/$(APP_BUNDLE)
+
 clean:
 	swift package clean
 	rm -rf $(APP_BUNDLE)
 
-.PHONY: all cli app debug bundle install-cli install-app clean
+.PHONY: all cli app debug bundle install-cli install-app setup clean

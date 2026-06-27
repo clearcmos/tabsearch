@@ -11,6 +11,11 @@ struct TabSearchBarApp: App {
                 delegate.controller.toggle()
             }
             Divider()
+            Toggle("Launch at Login", isOn: Binding(
+                get: { LoginItem.isEnabled },
+                set: { LoginItem.setEnabled($0) }
+            ))
+            Divider()
             if AXIsProcessTrusted() {
                 Text("Accessibility: granted")
             } else {

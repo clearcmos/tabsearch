@@ -35,9 +35,13 @@ searched fully.
 
 ```bash
 make install-app   # build, bundle, sign, and copy TabSearch.app to /Applications
+make setup         # install-app + launch it (fires the permission prompts)
 make install-cli   # build and copy the CLI to /usr/local/bin
 make debug         # quick debug build
 ```
+
+Enable **Launch at Login** from the menu-bar icon's menu (it registers the app via
+`SMAppService`; approve it in System Settings > Login Items if prompted).
 
 The app is signed with a stable self-signed identity so its permissions persist across
 rebuilds (see `CLAUDE.md` > Code signing).

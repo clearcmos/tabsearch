@@ -19,6 +19,8 @@ shipping a CLI and a SwiftUI menu bar app.
 make app           # build the menu bar app
 make bundle        # build + assemble + sign TabSearch.app (stable cert; see Code signing)
 make install-app   # bundle + copy to /Applications  (this is the real product)
+make setup         # install-app + launch it (fires the permission prompts); then enable
+                   #   "Launch at Login" from the menu
 make cli           # build the CLI
 make install-cli   # copy CLI to /usr/local/bin
 make debug         # quick debug build of both
@@ -120,6 +122,8 @@ Minimum macOS 13. Three SPM targets in `Package.swift`:
   slightly off. Fine for idle scrollback (the usual case).
 - Diagnostic `os.Logger` lines (subsystem `com.clearcmos.tabsearch`) are still in; read with
   `/usr/bin/log show --predicate 'subsystem == "com.clearcmos.tabsearch"'`. Quiet once stable.
-- Installed as a login item (System Settings > General > Login Items). A LaunchAgent would be
-  more robust.
+- "Launch at Login" is a menu toggle backed by `SMAppService` (`LoginItem.swift`): it
+  registers the app bundle itself, no scripting or extra permission. A freshly registered item
+  can report `.requiresApproval` until enabled in System Settings > Login Items, so the toggle
+  treats enabled-or-pending as "on" and opens that pane when approval is needed.
 - `TODO.md` holds a deferred plan to give the search panel the macOS 26 Liquid Glass look.
