@@ -4,109 +4,122 @@ Guidance for Claude Code when working in this repository.
 
 ## What This Is
 
-`tabsearch` searches text across all of Apple Terminal.app's tabs and windows and jumps to
-a match. Terminal's built-in Cmd+F only searches the frontmost tab. Terminal exposes no
-plugin/extension API, so this is a companion tool that reads and drives Terminal from the
-outside via AppleScript plus the Accessibility/Automation system.
+`tabsearch` searches text across all of Apple Terminal.app's tabs and windows, jumps to the
+tab, scrolls to the match, and glows a highlight over it. Terminal's built-in Cmd+F only
+searches the frontmost tab, and Terminal exposes no plugin/extension API - so this is a
+companion app that reads and drives Terminal from the outside via AppleScript and the
+Accessibility API.
 
-It is modeled on the sibling `blackout` project (same author): a Swift Package Manager
-macOS tool shipping both a CLI and a SwiftUI menu bar app.
+Modeled on the sibling `blackout` project (same author): a Swift Package Manager macOS tool
+shipping a CLI and a SwiftUI menu bar app.
 
 ## Build Commands
 
 ```bash
-make cli       # build the CLI (swift build -c release --product tabsearch)
-make app       # build the menu bar app
-make bundle    # build + assemble + ad-hoc sign TabSearch.app
-make debug     # debug build of both, to verify compilation quickly
+make app           # build the menu bar app
+make bundle        # build + assemble + sign TabSearch.app (stable cert; see Code signing)
+make install-app   # bundle + copy to /Applications  (this is the real product)
+make cli           # build the CLI
 make install-cli   # copy CLI to /usr/local/bin
-make install-app   # copy TabSearch.app to /Applications
+make debug         # quick debug build of both
 make clean
 ```
 
-No test target. `tabsearch demo` is the self-test: it runs the full round-trip against a
-throwaway window and prints PASS/FAIL.
+No test target. `tabsearch demo` is the self-test: creates a throwaway window, buries a
+marker, searches, jumps/scrolls to it, verifies it became visible, cleans up, prints PASS.
+It is keystroke-free, so it passes even from a non-Accessibility context.
+
+## Code signing (important)
+
+The app is signed with a **stable self-signed identity** `tabsearch-codesign` in the login
+keychain. A constant signature keeps the app's TCC grants (Accessibility, Automation) stable
+across rebuilds. Ad-hoc signing (`--sign -`) changes the signature every build and voided the
+grants each time, causing endless re-granting. The Makefile uses this identity and falls back
+to ad-hoc if it is absent.
+
+To recreate the identity (e.g. on a new machine):
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout k.pem -out c.pem -days 3650 -nodes \
+  -subj "/CN=tabsearch-codesign" -addext "basicConstraints=critical,CA:false" \
+  -addext "keyUsage=critical,digitalSignature" -addext "extendedKeyUsage=critical,codeSigning"
+openssl pkcs12 -export -legacy -inkey k.pem -in c.pem -out c.p12 -passout pass:tspass -name "tabsearch-codesign"
+security import c.p12 -P tspass -T /usr/bin/codesign     # then rm k.pem c.pem c.p12
+```
+`-legacy` is required or macOS `security` rejects the p12 ("MAC verification failed").
+After a rebuild changes the binary, grants persist; only a NEW cert would require re-granting.
 
 ## Architecture
 
 Minimum macOS 13. Three SPM targets in `Package.swift`:
 
-- **TabSearchKit** (library, Foundation only, no UI) - the reusable core, shared by the CLI
-  and the app.
-  - `TerminalBridge.swift` - all Terminal interaction: `listTabs`, `snapshotAllTabs` (one
-    AppleScript pass capturing every tab's scrollback), `filter` (pure in-memory line
-    search), `history(of:)`, `contents(of:)`, `search(_:)`, `jump(to:term:)`, `runDemo()`.
-- **tabsearch** (executable, depends on TabSearchKit) - `main.swift`, hand-rolled arg
-  parsing (`list`, `search`, `jump`, `demo`).
-- **TabSearchBar** (executable, depends on TabSearchKit; links AppKit + Carbon) - the menu
-  bar app. `TabSearchBarApp` (MenuBarExtra, accessory), `AppController`, `HotkeyManager`
-  (Carbon hot key), `SearchPanelController` (non-activating floating NSPanel + key monitor),
-  `SearchModel`, `SearchView`.
+- **TabSearchKit** (library, Foundation only) - the reusable core.
+  - `TerminalBridge.swift` - all Terminal interaction:
+    - `snapshotAllTabs()` - one AppleScript pass capturing every tab's scrollback (per-window
+      try/catch; some windows throw and must be skipped, not abort the whole snapshot).
+    - `filter(_:term:)` - pure in-memory line search; records each match's `relativePosition`
+      (0..1 for scrolling) and `charOffset` (for AX bounds).
+    - `jump(to:)` / `jump(to:relativePosition:)` - raise the tab and scroll via the scroll bar.
+    - `listTabs`, `history(of:)`, `contents(of:)`, `search(_:)`, `runDemo()`.
+- **tabsearch** (executable) - `main.swift`, hand-rolled args (`list`, `search`, `jump`, `demo`).
+- **TabSearchBar** (executable; links AppKit + Carbon, uses ApplicationServices) - the app.
+  - `TabSearchBarApp` (MenuBarExtra, accessory) / `AppController` (prompts Accessibility).
+  - `HotkeyManager` - Carbon `RegisterEventHotKey` for Shift+Cmd+F.
+  - `SearchPanelController` - non-activating floating NSPanel + local key monitor.
+  - `SearchModel` / `SearchView` - the search UI; `activateSelection()` jumps then flashes.
+  - `MatchOverlay` - the highlight glow window + AX geometry to position it.
 
-## Hard-Won AppleScript Gotchas (do not relearn these)
+## How jump + highlight work (and what was rejected)
 
-- `contents of <tabVariable>` fails with error -1700. `contents of` is a built-in
-  AppleScript dereference operator that shadows Terminal's `contents` property when the
-  right side is a plain variable. ALWAYS use the full inline specifier:
-  `get contents of tab N of window id W`. (`history` is not shadowed, but inline it too.)
-- `do script` returns a flaky tab reference; `contents/history of (do script result)`
-  errors. Re-acquire the tab via `selected tab of front window` or by `window id`.
-- Address windows by their stable `id`, not by index, so other windows opening/closing
-  does not move the target.
-- Tabs running full-screen / alternate-screen TUI apps (Claude Code, vim, less, htop,
-  tmux) expose empty `history`/`contents`. This is a Terminal limitation, not a bug.
-  Only normal command-output scrollback is searchable.
-- The global hot key MUST be a Carbon `RegisterEventHotKey`, NOT a CGEvent tap. Terminal's
-  "Secure Keyboard Entry" (which the author keeps on) blocks CGEvent taps from seeing keys
-  while Terminal is focused - exactly when the hot key is needed. Carbon hot keys are
-  dispatched by the system and fire regardless, and require no Accessibility.
-- The search panel must be a `.nonactivatingPanel` floating `NSPanel` with `canBecomeKey`
-  overridden to true, shown via `makeKeyAndOrderFront` + `orderFrontRegardless` + `makeKey`.
-  An accessory (LSUIElement) app cannot activate itself from a background hot key on modern
-  macOS, so a normal window stays invisible and non-key; the non-activating panel shows and
-  takes focus without activating the app.
-
-## AppleScript execution and the jump
-
-- `TerminalBridge.runAppleScript` shells out to `/usr/bin/osascript`. This is deliberate:
-  the app's Carbon hot key needs no Accessibility, so the app itself needs no TCC grant,
-  while osascript carries its own (already granted) Automation + Accessibility permissions
-  for reading tabs and driving the jump. Moving to in-process `NSAppleScript` would attach
-  grants to the app's bundle identity but risks background-thread Apple Event hangs;
-  deferred deliberately.
-- The jump drives Terminal's native Find (Cmd+F, type term, Return, Esc) via System Events,
-  which scrolls to and highlights the match. Secure Keyboard Entry does NOT block this
-  (synthetic posting still works; it only blocks event-tap reading). Possible refinement:
-  set the system Find pasteboard (`NSPasteboard(.find)`) + Cmd+G to avoid typing the term.
+- **Scroll** is done by setting the tab's **`AXScrollBar` value** (0=top, 1=bottom) to the
+  match's relative position, via System Events. This is keystroke-free, directed at a UI
+  element (no leaking into other apps), and Terminal honors it.
+- **Highlight** is an external `MatchOverlay` window (borderless, click-through, floating)
+  glowed over the matched line. Its rect comes from the AX API: `AXBoundsForRange` for exact
+  glyph bounds (with a row-math fallback from `AXVisibleCharacterRange` + uniform row height),
+  spanning the text area's full width. AX coords are top-left origin; flip to Cocoa bottom-left.
+- **Rejected approaches (do not retry):**
+  - Synthetic-keystroke Find (Cmd+F + type + Return): scrolls, but keys go to the FRONTMOST
+    app, so any focus race leaks Cmd-keystrokes into Finder/desktop ("opened random things").
+    Fragile and unsafe. Replaced by the scroll bar.
+  - `AXSelectedTextRange` / `AXVisibleCharacterRange` writes: Terminal accepts them but no-ops
+    (no scroll, and AXSelectedText reads back empty - so no real selection, ever). Cmd+J
+    ("Jump to Selection") is also ignored. Terminal has NO programmatic text selection; that
+    is why the highlight must be an external overlay.
 
 ## Permissions
 
-- The app itself needs NO TCC grant (Carbon hot key + non-activating panel).
-- osascript needs Automation (control Terminal + System Events) and Accessibility (to post
-  the Find keystrokes). Granted once to osascript and persistent - they do NOT reset when
-  the app is rebuilt, which is why rebuilds no longer require re-authorizing anything.
+- **Accessibility** (Privacy & Security > Accessibility): required, granted to **TabSearch.app**.
+  Used for the scroll (System Events UI scripting) and the overlay's direct AX reads. The
+  Carbon hot key itself does NOT need it.
+- **Automation**: control Terminal (read tabs, raise) and System Events (scroll). Prompted on
+  first use. The app shells to `osascript`; as the responsible process, the app's grants cover
+  its osascript children, so the stable cert keeps everything authorized across rebuilds.
 
-## What's built
+## Hard-Won AppleScript Gotchas (do not relearn these)
 
-- TabSearchKit core: `snapshotAllTabs` (one AppleScript pass), in-memory `filter`, and
-  `jump` (proven end to end by `tabsearch demo`).
-- `tabsearch` CLI: `list`, `search`, `jump`, `demo`.
-- `TabSearchBar` menu bar app (LSUIElement, `MenuBarExtra`); `make bundle` -> TabSearch.app.
-  - Global Shift+Cmd+F via Carbon `RegisterEventHotKey` (`HotkeyManager`). Works under
-    Terminal Secure Keyboard Entry and needs no Accessibility.
-  - Spotlight-style non-activating floating `NSPanel` hosting a SwiftUI view: snapshot on
-    open, live in-memory filter, focus re-asserted per open, Up/Down navigate, Return jumps,
-    Esc closes, click-away dismisses.
+- `contents of <tabVariable>` fails with -1700: `contents of` is a built-in dereference
+  operator that shadows Terminal's `contents` property. Use the full inline specifier
+  `get contents of tab N of window id W`. (`history` is not shadowed; inline it anyway.)
+- `do script` returns a flaky tab reference. Re-acquire via `selected tab of front window`
+  or by `window id`.
+- Address windows by stable `id`, not index.
+- `snapshotAllTabs` MUST wrap each window in `try`: some windows (certain full-screen TUI
+  sessions) throw -10000/-1728 when read, and one failure otherwise aborts the entire search.
+- TUI / alternate-screen tabs (Claude Code, vim, less, htop, tmux) expose empty
+  `history`/`contents` - only normal command-output scrollback is searchable. Not a bug.
+- Hot key MUST be Carbon `RegisterEventHotKey`, not a CGEvent tap: Terminal's "Secure Keyboard
+  Entry" (the author keeps it on) blocks event taps from seeing keys while Terminal is focused.
+- The search panel must be a `.nonactivatingPanel` floating NSPanel with `canBecomeKey`
+  overridden true; an accessory app can't activate itself from a background hot key, so a
+  normal window stays invisible/non-key.
 
 ## Known rough edges / TODO
 
-- Jump types the term into Terminal's Find, so if the term occurs multiple times in the
-  target tab it lands on the first occurrence, not necessarily the picked line. Fix with the
-  Find pasteboard + Cmd+G, or AX `AXSelectedTextRange` to the exact offset.
+- Offsets (`charOffset`, `relativePosition`) come from the snapshot taken when the panel
+  opened. If a tab produces output between snapshot and jump, the scroll/overlay can be
+  slightly off. Fine for idle scrollback (the usual case).
 - Diagnostic `os.Logger` lines (subsystem `com.clearcmos.tabsearch`) are still in; read with
-  `/usr/bin/log show --predicate 'subsystem == "com.clearcmos.tabsearch"'`. Quiet them once
-  the app has proven stable in daily use.
-- Not a login item yet; relaunch after reboot, or add it under System Settings > General >
-  Login Items, or ship a LaunchAgent.
-- Snapshot reads the full scrollback of every tab on each open (fine in practice; cap the
-  per-tab length if a tab ever has a huge buffer).
+  `/usr/bin/log show --predicate 'subsystem == "com.clearcmos.tabsearch"'`. Quiet once stable.
+- Installed as a login item (System Settings > General > Login Items). A LaunchAgent would be
+  more robust.
+- `TODO.md` holds a deferred plan to give the search panel the macOS 26 Liquid Glass look.

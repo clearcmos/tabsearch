@@ -55,10 +55,13 @@ final class SearchModel: ObservableObject {
     func activateSelection() {
         guard results.indices.contains(selection) else { return }
         let match = results[selection]
-        let term = query
         onRequestClose?()  // dismiss first for a snappy feel; the jump then raises Terminal
         work.async {
-            try? TerminalBridge.jump(to: match.tab, term: term)
+            try? TerminalBridge.jump(to: match)
+            // After the scroll settles, glow over the matched line.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                MatchOverlay.shared.flash(for: match)
+            }
         }
     }
 

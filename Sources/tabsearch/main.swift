@@ -46,7 +46,7 @@ do {
         let matches = try TerminalBridge.search(term)
         guard let first = matches.first else { print("No matches for \"\(term)\"."); break }
         print("Jumping to window \(first.tab.windowIndex) tab \(first.tab.tabIndex) line \(first.lineNumber)...")
-        try TerminalBridge.jump(to: first.tab, term: term)
+        try TerminalBridge.jump(to: first)
 
     case "demo":
         print("Running read/select/highlight round-trip self-test...\n")

@@ -19,8 +19,18 @@ public struct TabRef: Equatable {
 /// One matching line found in a tab's scrollback.
 public struct SearchMatch {
     public let tab: TabRef
-    public let lineNumber: Int   // 1-based line within the scrollback buffer
-    public let line: String      // the matching line, trimmed of surrounding whitespace
+    public let lineNumber: Int        // 1-based line within the scrollback buffer
+    public let line: String           // the matching line, trimmed of surrounding whitespace
+    public let relativePosition: Double  // 0 (top) .. 1 (bottom): where the line sits, for scrolling
+    public let charOffset: Int        // character offset of the line start in the scrollback (for AX bounds)
+
+    public init(tab: TabRef, lineNumber: Int, line: String, relativePosition: Double, charOffset: Int) {
+        self.tab = tab
+        self.lineNumber = lineNumber
+        self.line = line
+        self.relativePosition = relativePosition
+        self.charOffset = charOffset
+    }
 }
 
 /// A tab plus a captured copy of its scrollback, taken in a single AppleScript pass.
@@ -100,12 +110,14 @@ public enum TerminalBridge {
             set wi to 0
             repeat with w in windows
                 set wi to wi + 1
-                set wid to id of w
-                set ti to 0
-                repeat with t in tabs of w
-                    set ti to ti + 1
-                    set out to out & wi & "|" & wid & "|" & ti & "|" & (tty of t) & linefeed
-                end repeat
+                try
+                    set wid to id of w
+                    set ti to 0
+                    repeat with t in tabs of w
+                        set ti to ti + 1
+                        set out to out & wi & "|" & wid & "|" & ti & "|" & (tty of t) & linefeed
+                    end repeat
+                end try
             end repeat
         end tell
         return out
@@ -154,12 +166,19 @@ public enum TerminalBridge {
             set wi to 0
             repeat with w in windows
                 set wi to wi + 1
-                set wid to id of w
-                set ti to 0
-                repeat with t in tabs of w
-                    set ti to ti + 1
-                    set out to out & wi & rs & wid & rs & ti & rs & (tty of t) & rs & (history of tab ti of window id wid) & gs
-                end repeat
+                -- Per-window try: some windows (e.g. certain full-screen TUI sessions) throw
+                -- -10000/-1728 when their tabs/history are read. Skip them instead of letting
+                -- one bad window abort the entire snapshot (which left search finding nothing).
+                try
+                    set wid to id of w
+                    set ti to 0
+                    repeat with t in tabs of w
+                        set ti to ti + 1
+                        try
+                            set out to out & wi & rs & wid & rs & ti & rs & (tty of t) & rs & (history of tab ti of window id wid) & gs
+                        end try
+                    end repeat
+                end try
             end repeat
         end tell
         return out
@@ -188,6 +207,8 @@ public enum TerminalBridge {
             let normalized = snap.history
                 .replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
+            let total = Double(max(normalized.count, 1))
+            var offset = 0
             for (idx, rawLine) in normalized.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
                 let line = String(rawLine)
                 let hay = caseInsensitive ? line.lowercased() : line
@@ -195,9 +216,12 @@ public enum TerminalBridge {
                     matches.append(SearchMatch(
                         tab: snap.tab,
                         lineNumber: idx + 1,
-                        line: line.trimmingCharacters(in: .whitespaces)
+                        line: line.trimmingCharacters(in: .whitespaces),
+                        relativePosition: Double(offset) / total,
+                        charOffset: offset
                     ))
                 }
+                offset += line.count + 1  // +1 for the newline split() removed
             }
         }
         return matches
@@ -216,29 +240,36 @@ public enum TerminalBridge {
     // Production refinement: set the system Find pasteboard (NSPasteboard(.find)) and send
     // Cmd+G instead of synthetically typing arbitrary search text.
 
-    public static func jump(to tab: TabRef, term: String) throws {
-        let raise = """
+    /// Bring the tab to the front and scroll its scrollback to `relativePosition`
+    /// (0 = top, 1 = bottom) by setting the scroll bar's accessibility value.
+    ///
+    /// This is keystroke-free: it cannot leak keys into another app, needs no find bar, and is
+    /// directed at a specific UI element rather than the frontmost app. Terminal honors AXValue
+    /// writes on its scroll bar and scrolls accordingly (unlike AXSelectedTextRange, which it
+    /// accepts but no-ops). Requires Accessibility (UI scripting), which the app holds.
+    public static func jump(to tab: TabRef, relativePosition: Double) throws {
+        let rel = max(0.0, min(1.0, relativePosition))
+        let script = """
         tell application "Terminal"
             set frontmost of window id \(tab.windowID) to true
             set selected of tab \(tab.tabIndex) of window id \(tab.windowID) to true
             activate
         end tell
-        """
-        try runAppleScript(raise)
-
-        let find = """
-        delay 0.2
         tell application "System Events"
-            keystroke "f" using command down
-            delay 0.3
-            keystroke \(asLiteral(term))
-            delay 0.4
-            key code 36
-            delay 0.5
-            key code 53
+            tell process "Terminal"
+                try
+                    set value of scroll bar 1 of scroll area 1 of splitter group 1 of front window to \(rel)
+                end try
+            end tell
         end tell
         """
-        try runAppleScript(find)
+        try runAppleScript(script)
+    }
+
+    /// Jump to a specific search result: raise its tab and scroll to where the match sits in
+    /// that tab's scrollback.
+    public static func jump(to match: SearchMatch) throws {
+        try jump(to: match.tab, relativePosition: match.relativePosition)
     }
 
     // MARK: - Self-test (the spike)
@@ -286,7 +317,9 @@ public enum TerminalBridge {
         let found = try search(marker).filter { $0.tab.windowID == wid }
         report.append("3. search() matches in test window: \(found.count)")
 
-        try jump(to: tab, term: marker)
+        if let target = found.first {
+            try jump(to: target)
+        }
         Thread.sleep(forTimeInterval: 0.6)
         let after = try contents(of: tab).contains(marker)
         report.append("4. marker visible AFTER jump: \(after)  (expect true)")

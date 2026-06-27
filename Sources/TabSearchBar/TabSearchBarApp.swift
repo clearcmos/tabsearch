@@ -1,4 +1,5 @@
 import SwiftUI
+import ApplicationServices
 
 @main
 struct TabSearchBarApp: App {
@@ -8,6 +9,14 @@ struct TabSearchBarApp: App {
         MenuBarExtra("tabsearch", systemImage: "magnifyingglass") {
             Button("Search all tabs   (Shift+Cmd+F)") {
                 delegate.controller.toggle()
+            }
+            Divider()
+            if AXIsProcessTrusted() {
+                Text("Accessibility: granted")
+            } else {
+                Button("Grant Accessibility (needed to jump)...") {
+                    delegate.controller.promptAccessibility()
+                }
             }
             Divider()
             Button("Quit tabsearch") {
